@@ -255,7 +255,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -604,7 +604,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "panned"
 version = "0.1.0"
-source = "git+https://github.com/ZackaryW/panned#acd0a7b8faf3910568e7dfbafd7f4397d1b49084"
+source = "git+https://github.com/ZackaryW/panned#95023ed974719c3cdf38825e03da9dd4982e0ee7"
 dependencies = [
  "clap",
  "serde",
@@ -690,7 +690,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -888,7 +888,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
