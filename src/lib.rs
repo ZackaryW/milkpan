@@ -6,14 +6,25 @@
 //! request.
 #![warn(missing_docs)]
 
+pub mod bucket;
+pub mod config;
+pub mod hooks;
 pub mod provider;
 pub mod spec;
 pub mod state;
 pub mod store;
 
+pub use bucket::{Acquired, Bucket, BucketBuilder, DueOutcomes, Reclaimed};
+pub use hooks::{AfterFetch, BeforeReclaim, Stored};
+pub use provider::{Provider, Registry, Resolved};
 pub use spec::Spec;
 pub use state::{Clock, Lease, LeaseSettings, State, StateFile, SystemClock};
 pub use store::{ContentKind, Store};
+
+/// A milkpan-namespaced error code, such as `milkpan.fetch_failed`.
+pub(crate) fn code(name: &str) -> panned::ErrorCode {
+    panned::ErrorCode::tool("milkpan", name).expect("valid milkpan error code")
+}
 
 #[cfg(test)]
 mod tests {
