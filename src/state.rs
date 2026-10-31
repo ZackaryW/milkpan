@@ -83,6 +83,16 @@ pub struct Lease {
     pub settings: LeaseSettings,
 }
 
+/// A stable link to a lease's content, with the file its shim launches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkRecord {
+    /// The lease the link follows.
+    pub lease: Uuid,
+    /// The file inside the content that `<home>/bin/<name>` launches, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
 /// The bucket's recorded state.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct State {
@@ -95,6 +105,9 @@ pub struct State {
     /// Known digests, keyed by `"<spec> <version>"`.
     #[serde(default)]
     pub versions: BTreeMap<String, String>,
+    /// Links by name.
+    #[serde(default)]
+    pub links: BTreeMap<String, LinkRecord>,
 }
 
 pub(crate) fn history_key(scope: &Scope, spec: &Spec) -> String {
@@ -114,6 +127,15 @@ impl State {
     /// A lease by id.
     pub fn lease(&self, id: Uuid) -> Option<&Lease> {
         self.leases.iter().find(|l| l.id == id)
+    }
+
+    /// The links following a lease.
+    pub fn links_of(&self, id: Uuid) -> Vec<(String, LinkRecord)> {
+        self.links
+            .iter()
+            .filter(|(_, l)| l.lease == id)
+            .map(|(n, l)| (n.clone(), l.clone()))
+            .collect()
     }
 
     /// The stored digest of a spec's version, if fetched before.

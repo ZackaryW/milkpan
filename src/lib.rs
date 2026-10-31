@@ -15,16 +15,17 @@ pub mod bucket;
 pub mod cli;
 pub mod config;
 pub mod hooks;
+mod links;
 pub mod provider;
 pub mod spec;
 pub mod state;
 pub mod store;
 
-pub use bucket::{Acquired, Bucket, BucketBuilder, DueOutcomes, Reclaimed};
+pub use bucket::{Acquired, Bucket, BucketBuilder, DueOutcomes, Linked, Reclaimed};
 pub use hooks::{AfterFetch, BeforeReclaim, Stored};
 pub use provider::{Provider, Registry, Resolved};
 pub use spec::Spec;
-pub use state::{Clock, Lease, LeaseSettings, State, StateFile, SystemClock};
+pub use state::{Clock, Lease, LeaseSettings, LinkRecord, State, StateFile, SystemClock};
 pub use store::{ContentKind, Removal, Store};
 
 /// A milkpan-namespaced error code, such as `milkpan.fetch_failed`.

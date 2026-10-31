@@ -7,7 +7,7 @@ use panned::{Error, ErrorCode, StaticRules, core::Rule};
 use serde::Deserialize;
 
 /// The lease operations milkpan authorizes.
-pub const ACTIONS: [&str; 4] = ["acquire", "reacquire", "read", "release"];
+pub const ACTIONS: [&str; 5] = ["acquire", "reacquire", "read", "release", "link"];
 
 /// The configuration file name under the bucket home.
 pub const FILE: &str = "milkpan.toml";

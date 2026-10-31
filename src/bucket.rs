@@ -18,9 +18,12 @@ use uuid::Uuid;
 use crate::{
     config,
     hooks::{AfterFetch, BeforeReclaim, LeaseHook, Stored, VerifyHook, fulfil},
+    links,
     provider::{Provider, Registry},
     spec::Spec,
-    state::{Clock, Lease, LeaseSettings, State, StateFile, SystemClock, history_key, version_key},
+    state::{
+        Clock, Lease, LeaseSettings, LinkRecord, State, StateFile, SystemClock, history_key, version_key,
+    },
     store::{ContentKind, Removal, Store},
 };
 
@@ -33,6 +36,19 @@ pub struct Acquired {
     pub path: PathBuf,
     /// Whether content was downloaded by this operation.
     pub fetched: bool,
+}
+
+/// A link as recorded and where it lives.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Linked {
+    /// The link name.
+    pub name: String,
+    /// The lease it follows.
+    pub lease: Lease,
+    /// `<home>/links/<name>`.
+    pub path: PathBuf,
+    /// The launcher in `<home>/bin`, when linked with a file.
+    pub shim: Option<PathBuf>,
 }
 
 /// Each due lease and the outcome of reacquiring it.
@@ -210,6 +226,34 @@ impl Bucket {
         Ok(settings)
     }
 
+    /// The directory a link to `lease` points at: the tree of an archive, or a
+    /// named view of a single file (named after `file`, the spec path or the asset).
+    fn content_dir(&self, lease: &Lease, file: Option<&str>) -> Result<PathBuf, Error> {
+        match lease.kind {
+            ContentKind::Archive => self.store.tree(&lease.digest),
+            ContentKind::File => {
+                let spec_name = lease
+                    .spec
+                    .path
+                    .as_deref()
+                    .or(lease.spec.asset.as_deref())
+                    .and_then(|p| p.rsplit('/').next())
+                    .filter(|n| !n.contains('*'));
+                let name = file.or(spec_name).unwrap_or("content");
+                self.store.file_view(&lease.digest, name, file.is_some())
+            }
+        }
+    }
+
+    /// Point every link following `lease` at its current content.
+    fn repoint(&self, state: &State, lease: &Lease) -> Result<(), Error> {
+        for (name, record) in state.links_of(lease.id) {
+            let dir = self.content_dir(lease, record.file.as_deref())?;
+            links::point(&self.home, &name, &dir)?;
+        }
+        Ok(())
+    }
+
     fn content_path(&self, kind: ContentKind, digest: &str) -> Result<PathBuf, Error> {
         match kind {
             ContentKind::File => Ok(self.store.blob_path(digest)),
@@ -294,7 +338,12 @@ impl Bucket {
                 .versions
                 .insert(version_key(&spec, &resolved.version), digest.clone());
             state.upsert(lease.clone());
-            Ok((lease, previous.is_some_and(|p| p.version != resolved.version)))
+            let swapped = previous.is_some_and(|p| p.version != resolved.version);
+            if swapped {
+                // Links follow the swap; the content they pointed at before stays untouched.
+                self.repoint(state, &lease)?;
+            }
+            Ok((lease, swapped))
         })?;
         if swapped {
             // The swap is committed; reclamation failing must not fail the acquisition.
@@ -304,13 +353,10 @@ impl Bucket {
     }
 
     fn live(&self, id: Uuid) -> Result<(Lease, Arc<dyn Provider>), Error> {
-        let lease = self
-            .state
-            .read()?
-            .lease(id)
-            .cloned()
-            .ok_or_else(|| lease_gone(id))?;
-        if lease.expires_at <= self.clock.now() {
+        let state = self.state.read()?;
+        let lease = state.lease(id).cloned().ok_or_else(|| lease_gone(id))?;
+        // Linked leases do not expire.
+        if lease.expires_at <= self.clock.now() && state.links_of(id).is_empty() {
             return Err(lease_gone(id).with_detail("expired", true));
         }
         let provider = self.providers.get(&lease.spec.prefix)?;
@@ -333,12 +379,12 @@ impl Bucket {
     /// Reacquire every live lease whose refresh cadence has elapsed.
     pub fn reacquire_due(&self, principal: &Principal) -> Result<DueOutcomes, Error> {
         let now = self.clock.now();
-        let due: Vec<Uuid> = self
-            .state
-            .read()?
+        let state = self.state.read()?;
+        let due: Vec<Uuid> = state
             .leases
             .iter()
-            .filter(|l| l.expires_at > now && now >= l.resolved_at.saturating_add(l.settings.refresh))
+            .filter(|l| l.expires_at > now || !state.links_of(l.id).is_empty())
+            .filter(|l| now >= l.resolved_at.saturating_add(l.settings.refresh))
             .map(|l| l.id)
             .collect();
         Ok(due
@@ -351,9 +397,13 @@ impl Bucket {
     pub fn release(&self, id: Uuid, principal: &Principal) -> Result<Lease, Error> {
         let (lease, provider) = self.live(id)?;
         self.authorize(principal, &lease.scope, "release", &lease.spec, provider.as_ref())?;
-        let released = self
-            .state
-            .transact(|state| state.remove(id).ok_or_else(|| lease_gone(id)))?;
+        let released = self.state.transact(|state| {
+            for (name, _) in state.links_of(id) {
+                links::remove(&self.home, &name)?;
+                state.links.remove(&name);
+            }
+            state.remove(id).ok_or_else(|| lease_gone(id))
+        })?;
         let _ = self.reclaim();
         Ok(released)
     }
@@ -395,6 +445,114 @@ impl Bucket {
             );
         }
         Ok(path)
+    }
+
+    /// Link a lease under `name`, and with `file` also write the launcher
+    /// `<home>/bin/<name>`. The link follows every later version of the lease;
+    /// linking renews the lease, and linked leases do not expire.
+    pub fn link(
+        &self,
+        id: Uuid,
+        name: &str,
+        file: Option<&str>,
+        principal: &Principal,
+    ) -> Result<Linked, Error> {
+        links::validate_name(name)?;
+        let file = file.map(links::validate_file).transpose()?;
+        let (lease, provider) = self.live(id)?;
+        self.authorize(principal, &lease.scope, "link", &lease.spec, provider.as_ref())?;
+        let file_text = file.as_ref().map(|f| f.to_string_lossy().replace('\\', "/"));
+        let dir = self.content_dir(&lease, file_text.as_deref())?;
+        if let Some(file) = &file
+            && !dir.join(file).is_file()
+        {
+            return Err(Error::new(
+                ErrorCode::NotFound,
+                format!("{} is not in the lease's content", file.display()),
+            )
+            .with_detail("file", file.to_string_lossy().into_owned())
+            .with_detail("lease", id.to_string()));
+        }
+        let now = self.clock.now();
+        self.state.transact(|state| {
+            if let Some(existing) = state.links.get(name)
+                && existing.lease != id
+            {
+                return Err(Error::new(
+                    ErrorCode::Conflict,
+                    format!("link {name} belongs to lease {}", existing.lease),
+                )
+                .with_detail("name", name)
+                .with_detail("lease", existing.lease.to_string()));
+            }
+            let lease = state
+                .leases
+                .iter_mut()
+                .find(|l| l.id == id)
+                .ok_or_else(|| lease_gone(id))?;
+            lease.expires_at = now + lease.settings.ttl;
+            let lease = lease.clone();
+            let path = links::point(&self.home, name, &dir)?;
+            links::remove_shims(&self.home, name)?;
+            let shim = file
+                .as_ref()
+                .map(|f| links::write_shim(&self.home, name, f))
+                .transpose()?;
+            state.links.insert(
+                name.into(),
+                LinkRecord {
+                    lease: id,
+                    file: file_text.clone(),
+                },
+            );
+            Ok(Linked {
+                name: name.into(),
+                lease,
+                path,
+                shim,
+            })
+        })
+    }
+
+    /// Remove a link and its launcher. The lease stays, with normal expiry once unlinked.
+    pub fn unlink(&self, name: &str, principal: &Principal) -> Result<LinkRecord, Error> {
+        let state = self.state.read()?;
+        let record = state.links.get(name).cloned().ok_or_else(|| unknown_link(name))?;
+        if let Some(lease) = state.lease(record.lease) {
+            let provider = self.providers.get(&lease.spec.prefix)?;
+            self.authorize(principal, &lease.scope, "link", &lease.spec, provider.as_ref())?;
+        }
+        self.state.transact(|state| {
+            let record = state.links.remove(name).ok_or_else(|| unknown_link(name))?;
+            links::remove(&self.home, name)?;
+            Ok(record)
+        })
+    }
+
+    /// Every link with the lease it follows.
+    pub fn links(&self) -> Result<Vec<Linked>, Error> {
+        let state = self.state.read()?;
+        let bin = self.home.join("bin");
+        Ok(state
+            .links
+            .iter()
+            .filter_map(|(name, record)| {
+                let lease = state.lease(record.lease)?.clone();
+                let shim = record.file.as_ref().map(|_| {
+                    if cfg!(windows) {
+                        bin.join(format!("{name}.cmd"))
+                    } else {
+                        bin.join(name)
+                    }
+                });
+                Some(Linked {
+                    name: name.clone(),
+                    lease,
+                    path: links::link_path(&self.home, name),
+                    shim,
+                })
+            })
+            .collect())
     }
 
     /// Leases, optionally only one scope's.
@@ -445,7 +603,7 @@ impl Bucket {
             let expired: Vec<Uuid> = state
                 .leases
                 .iter()
-                .filter(|l| l.expires_at <= now)
+                .filter(|l| l.expires_at <= now && !state.links.values().any(|r| r.lease == l.id))
                 .map(|l| l.id)
                 .collect();
             for id in &expired {
@@ -496,6 +654,10 @@ fn protected(state: &mut State) -> BTreeSet<String> {
         }
     }
     protected
+}
+
+fn unknown_link(name: &str) -> Error {
+    Error::new(ErrorCode::NotFound, format!("no link named {name:?}")).with_detail("name", name)
 }
 
 fn lease_gone(id: Uuid) -> Error {
