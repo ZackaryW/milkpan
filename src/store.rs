@@ -203,13 +203,35 @@ impl Store {
         Ok(digests)
     }
 
-    /// Remove staging files left by interrupted operations.
-    pub fn clear_tmp(&self) -> Result<(), Error> {
+    /// Remove staging entries older than `age`, left by interrupted operations.
+    /// Younger entries may belong to a download still running in another
+    /// process, so they are kept. Returns how many entries were removed.
+    pub fn clear_stale_tmp(&self, age: std::time::Duration) -> Result<usize, Error> {
         let tmp = self.root.join("tmp");
-        if tmp.exists() {
-            fs::remove_dir_all(&tmp).map_err(|e| io_error(&tmp, e))?;
+        let Ok(entries) = fs::read_dir(&tmp) else {
+            return Ok(0);
+        };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            let stale = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|e| e >= age);
+            if !stale {
+                continue;
+            }
+            let path = entry.path();
+            let result = if path.is_dir() {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+            result.map_err(|e| io_error(&path, e))?;
+            removed += 1;
         }
-        Ok(())
+        Ok(removed)
     }
 }
 
@@ -310,6 +332,25 @@ mod tests {
             0,
             "staging is cleaned"
         );
+    }
+
+    #[test]
+    fn only_stale_staging_entries_are_cleared() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::new(home.path());
+        let tmp = home.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        let old = File::create(tmp.join("old")).unwrap();
+        let two_days = std::time::Duration::from_secs(2 * 86_400);
+        old.set_modified(std::time::SystemTime::now() - two_days).unwrap();
+        File::create(tmp.join("running")).unwrap();
+        assert_eq!(
+            store
+                .clear_stale_tmp(std::time::Duration::from_secs(86_400))
+                .unwrap(),
+            1
+        );
+        assert!(!tmp.join("old").exists() && tmp.join("running").exists());
     }
 
     #[test]

@@ -47,6 +47,8 @@ pub struct Reclaimed {
     pub removed: Vec<String>,
     /// Blobs a before-reclaim hook kept.
     pub retained_by_hook: Vec<String>,
+    /// Staging entries older than a day removed from `tmp/`.
+    pub stale_staging: usize,
 }
 
 /// Assembles a [`Bucket`].
@@ -434,7 +436,10 @@ impl Bucket {
     pub fn reclaim(&self) -> Result<Reclaimed, Error> {
         let now = self.clock.now();
         self.state.transact(|state| {
-            let mut reclaimed = Reclaimed::default();
+            let mut reclaimed = Reclaimed {
+                stale_staging: self.store.clear_stale_tmp(Duration::from_secs(86_400))?,
+                ..Reclaimed::default()
+            };
             let expired: Vec<Uuid> = state
                 .leases
                 .iter()

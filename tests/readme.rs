@@ -5,7 +5,8 @@ use milkpan::{BucketBuilder, config};
 use panned::{Authorizer, Context, Request, Scope};
 
 fn readme_toml() -> String {
-    let readme = include_str!("../README.md");
+    // Checkouts with core.autocrlf have CRLF line endings.
+    let readme = include_str!("../README.md").replace("\r\n", "\n");
     let start = readme.find("```toml\n").expect("README has a toml example") + "```toml\n".len();
     readme[start..].split("```").next().unwrap().to_string()
 }
