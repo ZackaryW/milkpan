@@ -22,12 +22,13 @@ Download the archive for your platform from
 | `github:owner/repo[@ref]` | the repository's files at the commit, without history | commit SHA |
 | `github:owner/repo:path/to/file[@ref]` | only that file | commit SHA |
 | `github-release:owner/repo@tag#asset` | one release asset; `@latest` and `*` patterns allowed | asset id |
+| `local:/abs/path/to/repo[@ref]` | a local git repository's committed files at the commit (needs `git`) | commit SHA |
 
 Release assets named `*.tar.gz`, `*.tgz` or `*.zip` are extracted into a
 directory (a top-level folder shared by every entry is stripped, and
 executable bits are kept on Unix); other assets stay single files.
 
-Without `@ref`, the default branch is used. An asset pattern must match exactly
+Without `@ref`, the default branch is used (`HEAD` for local repositories). An asset pattern must match exactly
 one asset. Owner and repository names are case-insensitive; paths, refs and
 asset names are not.
 

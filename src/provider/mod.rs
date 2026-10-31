@@ -7,6 +7,7 @@ use panned::{Error, ErrorCode};
 use crate::{spec::Spec, store::ContentKind};
 
 pub mod github;
+pub mod local;
 
 /// What a spec's selector resolved to.
 #[derive(Debug, Clone, PartialEq, Eq)]
