@@ -114,8 +114,14 @@ pub(crate) fn history_key(scope: &Scope, spec: &Spec) -> String {
     format!("{scope} {spec}")
 }
 
+/// Versions are indexed without the selector: one commit reached through
+/// `@main`, `@v1` or `@<sha>` is the same stored content.
 pub(crate) fn version_key(spec: &Spec, version: &str) -> String {
-    format!("{spec} {version}")
+    let source = Spec {
+        selector: None,
+        ..spec.clone()
+    };
+    format!("{source} {version}")
 }
 
 impl State {

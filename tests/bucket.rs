@@ -421,3 +421,17 @@ fn configuration_is_optional_but_must_be_valid() {
     assert_eq!(error.code, ErrorCode::InvalidRequest);
     assert!(Path::new(&error.details["path"].to_string().trim_matches('"')).ends_with(config::FILE));
 }
+
+#[test]
+fn one_version_is_fetched_once_across_selectors() {
+    let setup = Setup::new();
+    let bucket = setup.with_rules(all("a").allow("b", &config::ACTIONS, &["*"]).unwrap());
+    let by_ref = bucket.acquire("fake:tool@main", &scope("a"), &me()).unwrap();
+    let by_version = bucket.acquire("fake:tool@v1", &scope("b"), &me()).unwrap();
+    assert!(
+        by_ref.fetched && !by_version.fetched,
+        "the second selector reuses the stored version"
+    );
+    assert_eq!(by_ref.lease.digest, by_version.lease.digest);
+    assert_eq!(setup.fake.counts().1, 1);
+}
