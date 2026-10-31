@@ -5,7 +5,7 @@ single files and release assets at exact versions, stores them
 content-addressed, leases them to scopes and reacquires them when their
 selector moves. Downloads happen only for versions it has not stored yet.
 
-Milkpan is built on [panned](../panned): every lease operation is a panned
+Milkpan is built on [panned](https://github.com/ZackaryW/panned): every lease operation is a panned
 authorization request, and the binary speaks panned's CLI protocol (JSON
 envelope, error codes, exit codes, `--protocol`).
 
@@ -134,6 +134,19 @@ Runner::new("tool", "0.1.0")
     .with(BucketCommands::new(handle))
     .main()
 ```
+
+## Developing with a local panned
+
+`Cargo.lock` pins the panned commit; `cargo update -p panned` moves it to
+panned's latest `main`. To build against a local checkout instead, without
+editing tracked files:
+
+```sh
+cargo test --config 'patch."https://github.com/ZackaryW/panned".panned.path="../panned"'
+```
+
+The patch also rewrites `Cargo.lock` to the local path; restore it with
+`git checkout Cargo.lock` before committing.
 
 ## License
 

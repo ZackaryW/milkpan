@@ -13,26 +13,15 @@ jobs:
     name: Format, lint and test
     runs-on: ubuntu-latest
     steps:
-      # milkpan depends on panned by path (../panned) until panned is published.
       - uses: actions/checkout@v7
         with:
-          path: milkpan
-          persist-credentials: false
-      - uses: actions/checkout@v7
-        with:
-          repository: ZackaryW/panned
-          path: panned
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - working-directory: milkpan
-        run: cargo fmt --check
-      - working-directory: milkpan
-        run: cargo clippy --all-targets -- -D warnings
-      - working-directory: milkpan
-        run: cargo test
-      - working-directory: milkpan
-        env:
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --no-deps
+        run: cargo doc --locked --no-deps
