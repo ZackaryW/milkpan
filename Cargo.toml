@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
-description = "A small resource bucket for GitHub: acquire, cache, lease and reacquire repository snapshots, files and release assets"
+description = "Lightweight GitHub resource bucket: acquire, cache and lease repo snapshots, files and release assets."
 readme = "README.md"
 
 [dependencies]

@@ -9,6 +9,12 @@ Milkpan is built on [panned](https://github.com/ZackaryW/panned): every lease op
 authorization request, and the binary speaks panned's CLI protocol (JSON
 envelope, error codes, exit codes, `--protocol`).
 
+## Install
+
+Download the archive for your platform from
+[Releases](https://github.com/ZackaryW/milkpan/releases) and check it against
+`SHA256SUMS`, or build from source with `cargo install --git https://github.com/ZackaryW/milkpan`.
+
 ## Specs
 
 | Spec | Fetches | Version |

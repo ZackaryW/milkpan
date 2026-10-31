@@ -1,0 +1,95 @@
+name: Release
+
+# Push a tag such as v0.1.0 to release. Binaries are built and smoke-tested in
+# parallel with the full test suite; the GitHub release is created only when
+# every job passed, so a failed run leaves no release to revoke.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Tests and version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tag matches the crate version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "milkpan") | .version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+      - run: cargo test --locked
+
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, smoke: true }
+          - { target: aarch64-apple-darwin, os: macos-latest, smoke: true }
+          - { target: x86_64-apple-darwin, os: macos-latest, smoke: false }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, smoke: true }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Smoke test the built binary
+        if: matrix.smoke
+        shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release/milkpan
+          home=$(mktemp -d)
+          "$bin" --version
+          "$bin" --format json protocol | grep -q '"protocol": 1'
+          MILKPAN_HOME="$home" "$bin" --format json scope list | grep -q '"default"'
+      - name: Package
+        shell: bash
+        run: |
+          name=milkpan-${GITHUB_REF_NAME}-${{ matrix.target }}
+          mkdir -p "dist/$name"
+          cp README.md LICENSE "dist/$name/"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/${{ matrix.target }}/release/milkpan.exe "dist/$name/"
+            (cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null)
+          else
+            cp target/${{ matrix.target }}/release/milkpan "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+          fi
+          rm -r "dist/$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
