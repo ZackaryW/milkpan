@@ -6,6 +6,15 @@
 //! request.
 #![warn(missing_docs)]
 
+pub mod provider;
+pub mod spec;
+pub mod state;
+pub mod store;
+
+pub use spec::Spec;
+pub use state::{Clock, Lease, LeaseSettings, State, StateFile, SystemClock};
+pub use store::{ContentKind, Store};
+
 #[cfg(test)]
 mod tests {
     use panned::{Authorizer, Context, Obligation, Request, Scope, StaticRules};
