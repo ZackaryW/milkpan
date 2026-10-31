@@ -1,0 +1,25 @@
+[package]
+name = "milkpan"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "A small resource bucket for GitHub: acquire, cache, lease and reacquire repository snapshots, files and release assets"
+readme = "README.md"
+
+[dependencies]
+panned = { path = "../panned" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
+fs4 = { version = "0.13", features = ["sync"] }
+tar = "0.4"
+flate2 = "1"
+ureq = { version = "2", features = ["json"] }
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"
+tiny_http = "0.12"
