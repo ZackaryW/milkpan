@@ -6,6 +6,11 @@
 //! request.
 #![warn(missing_docs)]
 
+// README examples are compiled as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 pub mod bucket;
 pub mod cli;
 pub mod config;
