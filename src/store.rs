@@ -1,10 +1,11 @@
-//! Immutable content-addressed blobs and the trees extracted from archives.
+//! Immutable content-addressed blobs, the trees extracted from archives and
+//! named views of single-file blobs.
 //!
 //! Content is written into `tmp/` while hashing and renamed into place, so a
 //! blob path either holds complete content or does not exist.
 use std::{
     fs::{self, File},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -18,13 +19,28 @@ use sha2::{Digest, Sha256};
 pub enum ContentKind {
     /// The blob is the content (a single file or a release asset).
     File,
-    /// The blob is a gzip tar archive presented as a directory tree.
+    /// The blob is a gzip tar or zip archive presented as a directory tree.
     Archive,
+}
+
+/// What deleting stored content did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removal {
+    /// The blob and everything derived from it are gone.
+    Removed,
+    /// The platform refused because something is in use; nothing was deleted.
+    InUse,
 }
 
 pub(crate) fn io_error(path: &Path, error: io::Error) -> Error {
     Error::new(ErrorCode::Internal, format!("{}: {error}", path.display()))
         .with_detail("path", path.display().to_string())
+}
+
+/// Whether the platform refused an operation because a file is open or running.
+fn in_use(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
+        || matches!(error.raw_os_error(), Some(5 | 32) if cfg!(windows))
 }
 
 /// The blob and tree store under a bucket home.
@@ -57,6 +73,11 @@ impl Store {
     /// Where the tree extracted from `digest` lives, whether or not it exists.
     pub fn tree_path(&self, digest: &str) -> PathBuf {
         self.root.join("trees").join(digest)
+    }
+
+    /// Where named views of the single-file blob `digest` live.
+    pub fn view_path(&self, digest: &str) -> PathBuf {
+        self.root.join("files").join(digest)
     }
 
     /// Whether a blob is stored.
@@ -99,87 +120,102 @@ impl Store {
         Ok(hex(&hasher.finalize()) == digest)
     }
 
-    /// The tree extracted from a gzip tar blob, extracting it on first use.
-    /// The archive's top-level directory is stripped; links and special files
-    /// are skipped; absolute paths and `..` components are rejected.
+    /// The tree extracted from a gzip tar or zip blob, extracting it on first
+    /// use. A top-level directory shared by every entry is stripped; links and
+    /// special files are skipped; absolute paths and `..` components are
+    /// rejected; executable bits are kept on Unix.
     pub fn tree(&self, digest: &str) -> Result<PathBuf, Error> {
         let target = self.tree_path(digest);
         if target.is_dir() {
             return Ok(target);
         }
         let staging = self.dir("tmp")?.join(uuid::Uuid::new_v4().to_string());
-        let extracted = self.extract(digest, &staging);
-        if let Err(error) = extracted {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(error);
-        }
-        self.dir("trees")?;
-        if fs::rename(&staging, &target).is_err() {
-            // Another process extracted the same blob first; trees are identical.
-            let _ = fs::remove_dir_all(&staging);
-            if !target.is_dir() {
+        let raw = staging.join("raw");
+        let placed = self.extract(digest, &raw).and_then(|()| {
+            let root = single_directory(&raw)?.unwrap_or(raw.clone());
+            self.dir("trees")?;
+            if fs::rename(&root, &target).is_err() && !target.is_dir() {
                 return Err(Error::new(
                     ErrorCode::Internal,
                     format!("cannot place tree {}", target.display()),
                 ));
             }
-        }
-        Ok(target)
+            // Otherwise another process extracted the same blob first; trees are identical.
+            Ok(())
+        });
+        let _ = fs::remove_dir_all(&staging);
+        placed.map(|()| target)
     }
 
-    fn extract(&self, digest: &str, staging: &Path) -> Result<(), Error> {
+    fn extract(&self, digest: &str, out: &Path) -> Result<(), Error> {
         let blob = self.blob_path(digest);
+        let mut file = File::open(&blob).map_err(|e| io_error(&blob, e))?;
+        let mut magic = [0u8; 4];
+        let read = file.read(&mut magic).map_err(|e| io_error(&blob, e))?;
+        drop(file);
+        fs::create_dir_all(out).map_err(|e| io_error(out, e))?;
         let file = File::open(&blob).map_err(|e| io_error(&blob, e))?;
-        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
-        fs::create_dir_all(staging).map_err(|e| io_error(staging, e))?;
-        let bad = |message: String| {
-            Error::new(
-                ErrorCode::tool("milkpan", "fetch_failed").expect("valid code"),
-                message,
-            )
-            .with_detail("digest", digest)
-        };
-        for entry in archive
-            .entries()
-            .map_err(|e| bad(format!("unreadable archive: {e}")))?
-        {
-            let mut entry = entry.map_err(|e| bad(format!("unreadable archive entry: {e}")))?;
-            let kind = entry.header().entry_type();
-            if !(kind.is_file() || kind.is_dir()) {
-                continue;
-            }
-            let path = entry
-                .path()
-                .map_err(|e| bad(format!("unreadable entry path: {e}")))?
-                .into_owned();
-            let relative =
-                relative_entry(&path).ok_or_else(|| bad(format!("unsafe entry path {}", path.display())))?;
-            let Some(relative) = relative else { continue };
-            let out = staging.join(&relative);
-            if kind.is_dir() {
-                fs::create_dir_all(&out).map_err(|e| io_error(&out, e))?;
-                continue;
-            }
-            if let Some(parent) = out.parent() {
-                fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
-            }
-            let mut file =
-                File::create(&out).map_err(|_| bad(format!("cannot write entry {}", relative.display())))?;
-            io::copy(&mut entry, &mut file).map_err(|e| io_error(&out, e))?;
+        let bad =
+            |message: String| Error::new(crate::code("fetch_failed"), message).with_detail("digest", digest);
+        match &magic[..read] {
+            [0x1f, 0x8b, ..] => extract_tar(file, out, &bad),
+            [0x50, 0x4b, 0x03, 0x04] => extract_zip(file, out, &bad),
+            _ => Err(bad("content is not a gzip tar or zip archive".into())),
         }
-        Ok(())
     }
 
-    /// Delete a blob and its tree, if present.
-    pub fn remove(&self, digest: &str) -> Result<(), Error> {
-        let tree = self.tree_path(digest);
-        if tree.exists() {
-            fs::remove_dir_all(&tree).map_err(|e| io_error(&tree, e))?;
+    /// A directory holding the single-file blob `digest` under `name`, created on
+    /// first use as a hard link (or a copy when linking fails).
+    pub fn file_view(&self, digest: &str, name: &str, executable: bool) -> Result<PathBuf, Error> {
+        if Path::new(name).components().count() != 1
+            || !matches!(Path::new(name).components().next(), Some(Component::Normal(_)))
+        {
+            return Err(
+                Error::new(ErrorCode::InvalidRequest, format!("invalid file name {name:?}"))
+                    .with_detail("file", name),
+            );
+        }
+        let dir = self.view_path(digest);
+        let path = dir.join(name);
+        if !path.is_file() {
+            fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
+            let blob = self.blob_path(digest);
+            if fs::hard_link(&blob, &path).is_err() {
+                fs::copy(&blob, &path).map_err(|e| io_error(&path, e))?;
+            }
+        }
+        if executable {
+            set_mode(&path, Some(0o755))?;
+        }
+        Ok(dir)
+    }
+
+    /// Delete a blob and everything derived from it. When the platform refuses
+    /// because something is in use (a running program on Windows), nothing is
+    /// deleted and [`Removal::InUse`] is returned.
+    pub fn remove(&self, digest: &str) -> Result<Removal, Error> {
+        // Move derived directories aside first: on Windows the move fails while a
+        // file inside is open, before anything has been deleted.
+        for dir in [self.view_path(digest), self.tree_path(digest)] {
+            if !dir.exists() {
+                continue;
+            }
+            let trash = self.dir("tmp")?.join(format!("trash-{}", uuid::Uuid::new_v4()));
+            match fs::rename(&dir, &trash) {
+                Ok(()) => {
+                    // Leftovers are cleared later as stale staging entries.
+                    let _ = fs::remove_dir_all(&trash);
+                }
+                Err(e) if in_use(&e) => return Ok(Removal::InUse),
+                Err(e) => return Err(io_error(&dir, e)),
+            }
         }
         let blob = self.blob_path(digest);
         match fs::remove_file(&blob) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(io_error(&blob, e)),
-            _ => Ok(()),
+            Ok(()) => Ok(Removal::Removed),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Removal::Removed),
+            Err(e) if in_use(&e) => Ok(Removal::InUse),
+            Err(e) => Err(io_error(&blob, e)),
         }
     }
 
@@ -235,16 +271,105 @@ impl Store {
     }
 }
 
-/// The entry path without the archive's top-level directory. `Some(None)` for
-/// the top-level directory itself, `None` for unsafe paths.
-fn relative_entry(path: &Path) -> Option<Option<PathBuf>> {
-    let mut components = path.components();
-    match components.next()? {
-        Component::Normal(_) => {}
-        _ => return None,
+fn extract_tar(file: File, out: &Path, bad: &dyn Fn(String) -> Error) -> Result<(), Error> {
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    for entry in archive
+        .entries()
+        .map_err(|e| bad(format!("unreadable archive: {e}")))?
+    {
+        let mut entry = entry.map_err(|e| bad(format!("unreadable archive entry: {e}")))?;
+        let kind = entry.header().entry_type();
+        if !(kind.is_file() || kind.is_dir()) {
+            continue;
+        }
+        let path = entry
+            .path()
+            .map_err(|e| bad(format!("unreadable entry path: {e}")))?
+            .into_owned();
+        let relative =
+            safe_relative(&path).ok_or_else(|| bad(format!("unsafe entry path {}", path.display())))?;
+        let Some(relative) = relative else { continue };
+        let target = out.join(&relative);
+        if kind.is_dir() {
+            fs::create_dir_all(&target).map_err(|e| io_error(&target, e))?;
+            continue;
+        }
+        let mode = entry.header().mode().ok();
+        write_entry(&target, &relative, &mut entry, mode, bad)?;
     }
+    Ok(())
+}
+
+fn extract_zip(file: File, out: &Path, bad: &dyn Fn(String) -> Error) -> Result<(), Error> {
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| bad(format!("unreadable archive: {e}")))?;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|e| bad(format!("unreadable archive entry: {e}")))?;
+        if entry.is_symlink() {
+            continue;
+        }
+        let relative = entry
+            .enclosed_name()
+            .ok_or_else(|| bad(format!("unsafe entry path {}", entry.name())))?;
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let target = out.join(&relative);
+        if entry.is_dir() {
+            fs::create_dir_all(&target).map_err(|e| io_error(&target, e))?;
+            continue;
+        }
+        let mode = entry.unix_mode();
+        write_entry(&target, &relative, &mut entry, mode, bad)?;
+    }
+    Ok(())
+}
+
+fn write_entry(
+    target: &Path,
+    relative: &Path,
+    content: &mut dyn Read,
+    mode: Option<u32>,
+    bad: &dyn Fn(String) -> Error,
+) -> Result<(), Error> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
+    }
+    let mut file =
+        File::create(target).map_err(|_| bad(format!("cannot write entry {}", relative.display())))?;
+    io::copy(content, &mut file).map_err(|e| io_error(target, e))?;
+    drop(file);
+    set_mode(target, mode)
+}
+
+/// Keep only whether a file is executable: `0o755` or `0o644`. No-op off Unix.
+fn set_mode(path: &Path, mode: Option<u32>) -> Result<(), Error> {
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|e| io_error(path, e))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+    Ok(())
+}
+
+/// The sole entry of `dir` when it is a directory, so a shared top level can be stripped.
+fn single_directory(dir: &Path) -> Result<Option<PathBuf>, Error> {
+    let mut entries = fs::read_dir(dir).map_err(|e| io_error(dir, e))?.flatten();
+    match (entries.next(), entries.next()) {
+        (Some(only), None) if only.path().is_dir() => Ok(Some(only.path())),
+        _ => Ok(None),
+    }
+}
+
+/// The entry path when safe. `Some(None)` for an empty path, `None` for
+/// absolute paths and `..` components.
+fn safe_relative(path: &Path) -> Option<Option<PathBuf>> {
     let mut relative = PathBuf::new();
-    for component in components {
+    for component in path.components() {
         match component {
             Component::Normal(part) => relative.push(part),
             Component::CurDir => {}
@@ -278,7 +403,6 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// Read a stored blob fully; used by tests and small files.
 #[cfg(test)]
 pub(crate) fn read_blob(store: &Store, digest: &str) -> Vec<u8> {
-    use std::io::Read;
     let mut bytes = Vec::new();
     File::open(store.blob_path(digest))
         .unwrap()
@@ -287,20 +411,40 @@ pub(crate) fn read_blob(store: &Store, digest: &str) -> Vec<u8> {
     bytes
 }
 
+/// A gzip tarball of `(path, content, mode)` entries.
 #[cfg(test)]
-pub(crate) fn tarball(entries: &[(&str, &[u8])]) -> Vec<u8> {
+pub(crate) fn tarball_with_modes(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
     let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
         Vec::new(),
         flate2::Compression::fast(),
     ));
-    for (path, data) in entries {
+    for (path, data, mode) in entries {
         let mut header = tar::Header::new_gnu();
         header.set_size(data.len() as u64);
-        header.set_mode(0o644);
+        header.set_mode(*mode);
         header.set_entry_type(tar::EntryType::Regular);
         builder.append_data(&mut header, path, *data).unwrap();
     }
     builder.into_inner().unwrap().finish().unwrap()
+}
+
+#[cfg(test)]
+pub(crate) fn tarball(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let entries: Vec<_> = entries.iter().map(|(p, d)| (*p, *d, 0o644)).collect();
+    tarball_with_modes(&entries)
+}
+
+/// A zip archive of `(path, content)` entries.
+#[cfg(test)]
+pub(crate) fn zipball(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut writer = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+    for (path, data) in entries {
+        writer
+            .start_file(*path, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(data).unwrap();
+    }
+    writer.finish().unwrap().into_inner()
 }
 
 #[cfg(test)]
@@ -367,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn tarballs_extract_without_their_top_level_directory() {
+    fn tarballs_extract_without_their_shared_top_level_directory() {
         let home = tempfile::tempdir().unwrap();
         let store = Store::new(home.path());
         let digest = put(
@@ -381,19 +525,94 @@ mod tests {
         assert_eq!(fs::read_to_string(tree.join("README.md")).unwrap(), "hi");
         assert_eq!(fs::read_to_string(tree.join("docs/a.md")).unwrap(), "a");
         assert_eq!(store.tree(&digest).unwrap(), tree, "extracted once");
-        store.remove(&digest).unwrap();
+        assert_eq!(store.remove(&digest).unwrap(), Removal::Removed);
         assert!(!tree.exists() && !store.has(&digest));
+    }
+
+    #[test]
+    fn zips_extract_and_root_level_archives_stay_whole() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::new(home.path());
+        let zipped = put(
+            &store,
+            &zipball(&[("tool-1.0/tool.exe", b"binary"), ("tool-1.0/README.md", b"r")]),
+        );
+        assert_eq!(
+            fs::read(store.tree(&zipped).unwrap().join("tool.exe")).unwrap(),
+            b"binary"
+        );
+        let flat = put(&store, &tarball(&[("tool", b"binary"), ("LICENSE", b"mit")]));
+        let tree = store.tree(&flat).unwrap();
+        assert!(tree.join("tool").is_file() && tree.join("LICENSE").is_file());
+        let plain = put(&store, b"not an archive");
+        assert_eq!(
+            store.tree(&plain).unwrap_err().code.as_str(),
+            "milkpan.fetch_failed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_entries_stay_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::new(home.path());
+        let digest = put(
+            &store,
+            &tarball_with_modes(&[("top/tool", b"#!/bin/sh\n", 0o755), ("top/doc", b"d", 0o600)]),
+        );
+        let tree = store.tree(&digest).unwrap();
+        assert_eq!(
+            fs::metadata(tree.join("tool")).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(tree.join("doc")).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn file_views_name_single_file_blobs() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::new(home.path());
+        let digest = put(&store, b"#!/bin/sh\necho hi\n");
+        let dir = store.file_view(&digest, "tool", true).unwrap();
+        assert_eq!(fs::read(dir.join("tool")).unwrap(), b"#!/bin/sh\necho hi\n");
+        assert!(store.file_view(&digest, "../x", false).is_err());
+        assert_eq!(store.remove(&digest).unwrap(), Removal::Removed);
+        assert!(!dir.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn content_in_use_is_left_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::new(home.path());
+        let digest = put(
+            &store,
+            &zipball(&[("top/tool.exe", b"binary"), ("top/other", b"o")]),
+        );
+        let tree = store.tree(&digest).unwrap();
+        let open = File::open(tree.join("tool.exe")).unwrap();
+        assert_eq!(store.remove(&digest).unwrap(), Removal::InUse);
+        assert!(
+            tree.join("other").is_file() && store.has(&digest),
+            "nothing was deleted"
+        );
+        drop(open);
+        assert_eq!(store.remove(&digest).unwrap(), Removal::Removed);
     }
 
     #[test]
     fn unsafe_archive_paths_are_rejected() {
         assert_eq!(
-            relative_entry(Path::new("top/a/b")),
-            Some(Some(PathBuf::from("a/b")))
+            safe_relative(Path::new("top/a/b")),
+            Some(Some(PathBuf::from("top/a/b")))
         );
-        assert_eq!(relative_entry(Path::new("top/")), Some(None));
-        assert_eq!(relative_entry(Path::new("top/../escape")), None);
-        assert_eq!(relative_entry(Path::new("/etc/passwd")), None);
-        assert_eq!(relative_entry(Path::new("../x")), None);
+        assert_eq!(safe_relative(Path::new("./")), Some(None));
+        assert_eq!(safe_relative(Path::new("top/../escape")), None);
+        assert_eq!(safe_relative(Path::new("/etc/passwd")), None);
+        assert_eq!(safe_relative(Path::new("../x")), None);
     }
 }

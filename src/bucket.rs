@@ -21,7 +21,7 @@ use crate::{
     provider::{Provider, Registry},
     spec::Spec,
     state::{Clock, Lease, LeaseSettings, State, StateFile, SystemClock, history_key, version_key},
-    store::{ContentKind, Store},
+    store::{ContentKind, Removal, Store},
 };
 
 /// The result of acquiring or reacquiring.
@@ -47,6 +47,8 @@ pub struct Reclaimed {
     pub removed: Vec<String>,
     /// Blobs a before-reclaim hook kept.
     pub retained_by_hook: Vec<String>,
+    /// Blobs kept because the platform reported them in use; retried next time.
+    pub in_use: Vec<String>,
     /// Staging entries older than a day removed from `tmp/`.
     pub stale_staging: usize,
 }
@@ -463,9 +465,11 @@ impl Bucket {
                 }
                 if keep {
                     reclaimed.retained_by_hook.push(digest);
-                } else {
-                    self.store.remove(&digest)?;
-                    reclaimed.removed.push(digest);
+                    continue;
+                }
+                match self.store.remove(&digest)? {
+                    Removal::Removed => reclaimed.removed.push(digest),
+                    Removal::InUse => reclaimed.in_use.push(digest),
                 }
             }
             let stored: BTreeSet<String> = self.store.digests()?.into_iter().collect();

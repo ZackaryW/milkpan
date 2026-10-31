@@ -19,6 +19,10 @@ flate2 = "1"
 ureq = { version = "2", features = ["json"] }
 dirs = "6"
 clap = "4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+junction = "1"
 
 [dev-dependencies]
 tempfile = "3"

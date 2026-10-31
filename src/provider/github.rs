@@ -164,7 +164,8 @@ impl GitHub {
             .sha)
     }
 
-    fn asset(&self, spec: &Spec) -> Result<String, Error> {
+    /// The id and name of the one asset matching the spec's pattern.
+    fn asset(&self, spec: &Spec) -> Result<(String, String), Error> {
         let tag = spec
             .selector
             .as_deref()
@@ -184,7 +185,7 @@ impl GitHub {
             .filter(|a| matches(pattern, &a.name))
             .collect();
         match matching.as_slice() {
-            [asset] => Ok(asset.id.to_string()),
+            [asset] => Ok((asset.id.to_string(), asset.name.clone())),
             [] => Err(Error::new(
                 ErrorCode::NotFound,
                 format!("no asset of {spec} matches {pattern:?}"),
@@ -276,10 +277,20 @@ impl Provider for GitHub {
 
     fn resolve(&self, spec: &Spec) -> Result<Resolved, Error> {
         Ok(match (spec.prefix.as_str(), &spec.path) {
-            ("github-release", _) => Resolved {
-                version: self.asset(spec)?,
-                kind: ContentKind::File,
-            },
+            ("github-release", _) => {
+                let (version, name) = self.asset(spec)?;
+                let archive = [".tar.gz", ".tgz", ".zip"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix));
+                Resolved {
+                    version,
+                    kind: if archive {
+                        ContentKind::Archive
+                    } else {
+                        ContentKind::File
+                    },
+                }
+            }
             (_, Some(_)) => Resolved {
                 version: self.commit(spec)?,
                 kind: ContentKind::File,
@@ -330,7 +341,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::store::{Store, tarball};
+    use crate::store::{Store, tarball, zipball};
 
     const MAIN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -414,9 +425,14 @@ mod tests {
                 (200, b"hello".to_vec(), false)
             }
             "/repos/octo/tools/releases/latest" => json(
-                r#"{"assets": [{"id": 11, "name": "tools-linux.tar.gz"}, {"id": 12, "name": "tools-mac.tar.gz"}]}"#,
+                r#"{"assets": [{"id": 11, "name": "tools-linux.tar.gz"}, {"id": 12, "name": "tools-mac.tar.gz"},
+                    {"id": 13, "name": "tools-windows.zip"}, {"id": 14, "name": "tools-cli"}]}"#,
             ),
             "/repos/octo/tools/releases/assets/11" => (200, b"linux build".to_vec(), false),
+            "/repos/octo/tools/releases/assets/13" => {
+                (200, zipball(&[("tool-1.0/tool.exe", b"windows build")]), false)
+            }
+            "/repos/octo/tools/releases/assets/14" => (200, b"plain build".to_vec(), false),
             "/repos/octo/limited" => (403, b"{}".to_vec(), true),
             "/repos/octo/broken" => (500, b"{}".to_vec(), false),
             _ => (404, b"{}".to_vec(), false),
@@ -527,6 +543,33 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidRequest);
         assert!(error.details["matches"].to_string().contains("tools-mac.tar.gz"));
+    }
+
+    #[test]
+    fn archive_assets_become_trees_and_plain_assets_stay_files() {
+        let mock = Mock::start();
+        let github = GitHub::new(mock.api()).with_token(None);
+        let zipped = spec("github-release:octo/tools@latest#tools-windows.zip");
+        let resolved = github.resolve(&zipped).unwrap();
+        assert_eq!(resolved.kind, ContentKind::Archive);
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::new(home.path());
+        let digest = store.ingest(|out| github.fetch(&zipped, &resolved, out)).unwrap();
+        assert_eq!(
+            std::fs::read(store.tree(&digest).unwrap().join("tool.exe")).unwrap(),
+            b"windows build"
+        );
+        let plain = github
+            .resolve(&spec("github-release:octo/tools@latest#tools-cli"))
+            .unwrap();
+        assert_eq!((plain.version.as_str(), plain.kind), ("14", ContentKind::File));
+        assert_eq!(
+            github
+                .resolve(&spec("github-release:octo/tools@latest#tools-linux*"))
+                .unwrap()
+                .kind,
+            ContentKind::Archive
+        );
     }
 
     #[test]

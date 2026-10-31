@@ -25,7 +25,7 @@ pub use hooks::{AfterFetch, BeforeReclaim, Stored};
 pub use provider::{Provider, Registry, Resolved};
 pub use spec::Spec;
 pub use state::{Clock, Lease, LeaseSettings, State, StateFile, SystemClock};
-pub use store::{ContentKind, Store};
+pub use store::{ContentKind, Removal, Store};
 
 /// A milkpan-namespaced error code, such as `milkpan.fetch_failed`.
 pub(crate) fn code(name: &str) -> panned::ErrorCode {
