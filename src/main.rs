@@ -11,7 +11,7 @@ fn main() {
         BucketBuilder::new(home).provider(GitHub::from_env()).build()
     });
     Runner::new("milkpan", env!("CARGO_PKG_VERSION"))
-        .with(GenericCommands::new(handle.clone(), handle.clone()))
+        .with(GenericCommands::new(handle.clone(), handle.clone()).with_slots(handle.clone()))
         .with(BucketCommands::new(handle))
         .main()
 }

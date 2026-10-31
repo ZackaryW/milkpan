@@ -10,7 +10,7 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use panned::{
-    Authorizer, Decision, Error, Principal, Request, Scope, ScopeList,
+    Authorizer, Decision, Error, Principal, Request, Scope, ScopeList, Slot, SlotState, Switch,
     cli::{CommandSet, Ctx, Outcome, error_json},
 };
 use serde_json::{Value as Json, json};
@@ -60,6 +60,22 @@ impl ScopeList for BucketHandle {
     }
 }
 
+/// Links as panned slots. Slot commands carry no principal, so the default
+/// principal (`MILKPAN_PRINCIPAL` or `user:<login>`) is used.
+impl Slot for BucketHandle {
+    fn slots(&self) -> Result<Vec<SlotState>, Error> {
+        self.bucket()?.slots()
+    }
+
+    fn slot(&self, name: &str) -> Result<SlotState, Error> {
+        self.bucket()?.slot(name)
+    }
+
+    fn switch(&self, name: &str, version: &str) -> Result<Switch, Error> {
+        self.bucket()?.switch(name, version, &default_principal())
+    }
+}
+
 /// The bucket home: `--home`, then `MILKPAN_HOME`, then the per-user data directory.
 pub fn resolve_home(args: &[OsString]) -> PathBuf {
     let flag = args
@@ -79,7 +95,8 @@ pub fn resolve_home(args: &[OsString]) -> PathBuf {
     .unwrap_or_else(|| PathBuf::from(".milkpan"))
 }
 
-fn default_principal() -> Principal {
+/// `MILKPAN_PRINCIPAL`, or `user:<login>`.
+pub fn default_principal() -> Principal {
     if let Ok(principal) = std::env::var("MILKPAN_PRINCIPAL")
         && !principal.is_empty()
     {
@@ -91,7 +108,7 @@ fn default_principal() -> Principal {
     Principal(format!("user:{user}"))
 }
 
-/// `acquire`, `reacquire`, `lease list|show`, `release`, `path` and `reclaim`.
+/// `acquire`, `reacquire`, `lease list|show`, `release`, `path`, `link`, `unlink` and `reclaim`.
 pub struct BucketCommands {
     handle: Arc<BucketHandle>,
 }
@@ -214,11 +231,40 @@ impl CommandSet for BucketCommands {
                 .arg(scope_arg())
                 .arg(principal_arg()),
         )
-        .subcommand(Command::new("reclaim").about("Drop expired leases and delete unheld content"))
+        .subcommand(
+            Command::new("link")
+                    .about("Keep <home>/links/<name> pointing at a lease's content; with --file, add <home>/bin/<name>")
+                    .args_conflicts_with_subcommands(true)
+                    .subcommand_negates_reqs(true)
+                    .arg(lease_arg())
+                    .arg(Arg::new("name").long("name").required(true).help("Link name"))
+                    .arg(Arg::new("file").long("file").help("File inside the content that <home>/bin/<name> launches"))
+                    .arg(scope_arg())
+                    .arg(principal_arg())
+                    .subcommand(Command::new("list").about("List links")),
+            )
+            .subcommand(
+                Command::new("unlink")
+                    .about("Remove a link and its launcher")
+                    .arg(Arg::new("name").required(true))
+                    .arg(principal_arg()),
+            )
+            .subcommand(Command::new("reclaim").about("Drop expired leases and delete unheld content"))
     }
 
     fn dispatch(&self, name: &str, matches: &ArgMatches, _ctx: &Ctx) -> Option<Result<Outcome, Error>> {
-        if !["acquire", "reacquire", "lease", "release", "path", "reclaim"].contains(&name) {
+        if ![
+            "acquire",
+            "reacquire",
+            "lease",
+            "release",
+            "path",
+            "link",
+            "unlink",
+            "reclaim",
+        ]
+        .contains(&name)
+        {
             return None;
         }
         Some(
@@ -273,6 +319,17 @@ fn run(bucket: &Bucket, name: &str, matches: &ArgMatches) -> Result<Outcome, Err
             let lease = args.lease(bucket)?;
             complete(json!({ "path": bucket.path(lease.id, args.text("file"), &args.principal())? }))
         }
+        "link" if matches.subcommand_matches("list").is_some() => {
+            complete(json!({ "links": bucket.links()? }))
+        }
+        "link" => {
+            let lease = args.lease(bucket)?;
+            let name = args.text("name").expect("required");
+            complete(bucket.link(lease.id, name, args.text("file"), &args.principal())?)
+        }
+        "unlink" => complete(
+            json!({ "unlinked": bucket.unlink(args.text("name").expect("required"), &args.principal())? }),
+        ),
         "reclaim" => complete(bucket.reclaim()?),
         _ => unreachable!("filtered in dispatch"),
     }

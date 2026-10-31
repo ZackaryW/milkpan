@@ -11,7 +11,10 @@ use std::{
     time::Duration,
 };
 
-use panned::{Authorizer, Context, Decision, Error, ErrorCode, Principal, Request, Scope, ScopeList};
+use panned::{
+    Authorizer, Context, Decision, Error, ErrorCode, Principal, Request, Scope, ScopeList, SlotState, Switch,
+    core::slot::{Effective, check_switch, unknown_slot},
+};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -553,6 +556,87 @@ impl Bucket {
                 })
             })
             .collect())
+    }
+
+    fn slot_of(&self, state: &State, name: &str) -> Result<(SlotState, Lease), Error> {
+        let record = state.links.get(name).ok_or_else(|| unknown_slot(name))?;
+        let lease = state
+            .lease(record.lease)
+            .cloned()
+            .ok_or_else(|| unknown_slot(name))?;
+        let mut available = vec![lease.version.clone()];
+        if let Some(history) = state.history.get(&history_key(&lease.scope, &lease.spec)) {
+            for version in history.iter().rev() {
+                if state
+                    .digest_for(&lease.spec, version)
+                    .is_some_and(|d| self.store.has(d))
+                {
+                    available.push(version.clone());
+                }
+            }
+        }
+        let slot = SlotState {
+            name: name.into(),
+            current: Some(lease.version.clone()),
+            available,
+        };
+        Ok((slot, lease))
+    }
+
+    /// Every link as a panned slot: the lease's version plus its retained versions.
+    pub fn slots(&self) -> Result<Vec<SlotState>, Error> {
+        let state = self.state.read()?;
+        state
+            .links
+            .keys()
+            .map(|name| self.slot_of(&state, name).map(|(slot, _)| slot))
+            .collect()
+    }
+
+    /// One link as a panned slot.
+    pub fn slot(&self, name: &str) -> Result<SlotState, Error> {
+        self.slot_of(&self.state.read()?, name).map(|(slot, _)| slot)
+    }
+
+    /// Point a link and its lease at one of the lease's retained versions. The
+    /// spec's selector is unchanged, so a later reacquisition may move it forward.
+    pub fn switch(&self, name: &str, version: &str, principal: &Principal) -> Result<Switch, Error> {
+        let (slot, lease) = self.slot_of(&self.state.read()?, name)?;
+        let switch = check_switch(&slot, version, Effective::NextRun)?;
+        if !switch.changed {
+            return Ok(switch);
+        }
+        let provider = self.providers.get(&lease.spec.prefix)?;
+        self.authorize(principal, &lease.scope, "link", &lease.spec, provider.as_ref())?;
+        self.state.transact(|state| {
+            let current = state
+                .lease(lease.id)
+                .cloned()
+                .ok_or_else(|| lease_gone(lease.id))?;
+            let digest = state
+                .digest_for(&current.spec, version)
+                .map(str::to_string)
+                .filter(|d| self.store.has(d))
+                .ok_or_else(|| {
+                    check_switch(
+                        &SlotState {
+                            available: vec![],
+                            ..slot.clone()
+                        },
+                        version,
+                        Effective::NextRun,
+                    )
+                    .unwrap_err()
+                })?;
+            let switched = Lease {
+                version: version.into(),
+                digest,
+                ..current
+            };
+            state.upsert(switched.clone());
+            self.repoint(state, &switched)
+        })?;
+        Ok(switch)
     }
 
     /// Leases, optionally only one scope's.

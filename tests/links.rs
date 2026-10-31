@@ -242,3 +242,54 @@ fn content_in_use_is_kept_and_retried() {
     drop(running);
     assert_eq!(s.bucket.reclaim().unwrap().removed, [lease.digest]);
 }
+
+#[test]
+fn links_are_slots_that_roll_back_to_retained_versions() {
+    let home = tempfile::tempdir().unwrap();
+    let releases = Releases::default();
+    releases.publish("v1");
+    let retain = vec![panned::Obligation::new("lease").with("retain", "1")];
+    let rules = Arc::new(
+        panned::StaticRules::default()
+            .allow_with("default", &milkpan::config::ACTIONS, &["*"], retain)
+            .unwrap(),
+    );
+    let bucket = BucketBuilder::new(home.path())
+        .provider(releases.clone())
+        .authorizer(rules.clone(), rules)
+        .build()
+        .unwrap();
+    let lease = bucket.acquire("rel:tool", &default(), &me()).unwrap().lease;
+    let shim = bucket
+        .link(lease.id, "tool", Some(TOOL), &me())
+        .unwrap()
+        .shim
+        .unwrap();
+    for version in ["v2", "v3"] {
+        releases.publish(version);
+        bucket.reacquire(lease.id, &me()).unwrap();
+    }
+    let slot = bucket.slot("tool").unwrap();
+    assert_eq!(
+        (slot.current.as_deref(), slot.available.clone()),
+        (Some("v3"), vec!["v3".into(), "v2".into()])
+    );
+
+    let switch = bucket.switch("tool", "v2", &me()).unwrap();
+    assert_eq!(
+        (switch.to.as_str(), switch.effective),
+        ("v2", panned::Effective::NextRun)
+    );
+    assert_eq!(run(&shim).0, "v2 hello");
+    assert_eq!(bucket.lease(lease.id).unwrap().version, "v2");
+    assert_eq!(
+        bucket.slot("tool").unwrap().available,
+        ["v2", "v3"],
+        "the forward version is retained"
+    );
+
+    let reclaimed = bucket.switch("tool", "v1", &me()).unwrap_err();
+    assert_eq!(reclaimed.code, ErrorCode::InvalidRequest);
+    assert_eq!(bucket.slots().unwrap().len(), 1);
+    assert_eq!(bucket.slot("nope").unwrap_err().code, ErrorCode::NotFound);
+}
