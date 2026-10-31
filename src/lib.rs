@@ -7,6 +7,7 @@
 #![warn(missing_docs)]
 
 pub mod bucket;
+pub mod cli;
 pub mod config;
 pub mod hooks;
 pub mod provider;

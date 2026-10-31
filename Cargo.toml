@@ -18,6 +18,7 @@ tar = "0.4"
 flate2 = "1"
 ureq = { version = "2", features = ["json"] }
 dirs = "6"
+clap = "4"
 
 [dev-dependencies]
 tempfile = "3"
