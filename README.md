@@ -59,8 +59,15 @@ leases could not be refreshed.
 
 ## Configuration
 
-The bucket lives in one directory: `--home`, then `$MILKPAN_HOME`, then the
-per-user data directory (for example `~/.local/share/milkpan`).
+The bucket lives in one directory: `--home`, then `$MILKPAN_HOME`, then
+`~/.milkpan` (`%USERPROFILE%\.milkpan` on Windows). Other tools built on milkpan,
+such as Powerspec, use the same default, so they share one bucket and its
+stored content.
+
+Before 0.3.0 the default was the per-user data directory
+(`~/.local/share/milkpan`, `%LOCALAPPDATA%\milkpan`). That bucket is not read
+anymore: move it to `~/.milkpan` while no milkpan is running, or keep using it
+with `MILKPAN_HOME=<old path>`.
 
 Without a configuration file, every operation is allowed in scope `default`
 and nowhere else. `milkpan.toml` in the home replaces that with panned
@@ -149,6 +156,8 @@ another API base; `gh` is only asked for a token when talking to
 `api.github.com`.
 
 ## Bucket layout
+
+By default `<home>` is `~/.milkpan`.
 
 ```text
 <home>/milkpan.toml            optional policy
