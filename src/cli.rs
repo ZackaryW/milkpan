@@ -76,8 +76,12 @@ impl Slot for BucketHandle {
     }
 }
 
-/// The bucket home: `--home`, then `MILKPAN_HOME`, then the per-user data directory.
+/// The bucket home: `--home`, then `MILKPAN_HOME`, then `.milkpan` in the user's home directory.
 pub fn resolve_home(args: &[OsString]) -> PathBuf {
+    home_from(args, std::env::var_os("MILKPAN_HOME"), std::env::home_dir())
+}
+
+fn home_from(args: &[OsString], variable: Option<OsString>, user_home: Option<PathBuf>) -> PathBuf {
     let flag = args
         .windows(2)
         .find(|w| w[0] == "--home")
@@ -86,13 +90,9 @@ pub fn resolve_home(args: &[OsString]) -> PathBuf {
             args.iter()
                 .find_map(|a| a.to_str()?.strip_prefix("--home=").map(PathBuf::from))
         });
-    flag.or_else(|| {
-        std::env::var_os("MILKPAN_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    })
-    .or_else(|| dirs::data_local_dir().map(|d| d.join("milkpan")))
-    .unwrap_or_else(|| PathBuf::from(".milkpan"))
+    flag.or_else(|| variable.filter(|v| !v.is_empty()).map(PathBuf::from))
+        .or_else(|| user_home.map(|home| home.join(".milkpan")))
+        .unwrap_or_else(|| PathBuf::from(".milkpan"))
 }
 
 /// `MILKPAN_PRINCIPAL`, or `user:<login>`.
@@ -332,5 +332,48 @@ fn run(bucket: &Bucket, name: &str, matches: &ArgMatches) -> Result<Outcome, Err
         ),
         "reclaim" => complete(bucket.reclaim()?),
         _ => unreachable!("filtered in dispatch"),
+    }
+}
+
+#[cfg(test)]
+mod home_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn home_precedence() {
+        let user = Some(PathBuf::from("/users/me"));
+        let variable = Some(OsString::from("/var/bucket"));
+        assert_eq!(
+            home_from(
+                &args(&["milkpan", "--home", "/flag"]),
+                variable.clone(),
+                user.clone()
+            ),
+            PathBuf::from("/flag")
+        );
+        assert_eq!(
+            home_from(&args(&["milkpan", "--home=/eq"]), variable.clone(), user.clone()),
+            PathBuf::from("/eq")
+        );
+        assert_eq!(
+            home_from(&args(&["milkpan"]), variable, user.clone()),
+            PathBuf::from("/var/bucket")
+        );
+        assert_eq!(
+            home_from(&args(&["milkpan"]), Some(OsString::new()), user.clone()),
+            PathBuf::from("/users/me/.milkpan")
+        );
+        assert_eq!(
+            home_from(&args(&["milkpan"]), None, user),
+            PathBuf::from("/users/me/.milkpan")
+        );
+        assert_eq!(
+            home_from(&args(&["milkpan"]), None, None),
+            PathBuf::from(".milkpan")
+        );
     }
 }

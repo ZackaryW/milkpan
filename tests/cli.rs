@@ -248,3 +248,25 @@ fn a_depending_binary_reuses_the_commands_with_its_own_provider() {
     assert_eq!(out["result"]["reacquired"].as_array().unwrap().len(), 1);
     assert_eq!(out["result"]["failed"][0]["error"]["code"], "unavailable");
 }
+
+#[test]
+fn the_default_home_is_dot_milkpan_in_the_user_home() {
+    let user = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_milkpan"))
+        .env_remove("MILKPAN_HOME")
+        .env("HOME", user.path())
+        .env("USERPROFILE", user.path())
+        .args(["--format", "json", "reclaim"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        user.path().join(".milkpan").is_dir(),
+        "the bucket is created in ~/.milkpan"
+    );
+}
