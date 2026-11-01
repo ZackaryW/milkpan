@@ -29,11 +29,15 @@ All commands SHALL use panned's envelope, base and namespaced error codes, exit 
 - **THEN** it lists the scopes defined in the configuration, or `default` without one
 
 ### Requirement: Bucket location is configurable
-The bucket's state, blobs and configuration SHALL live under one home directory, chosen by `--home`, then `MILKPAN_HOME`, then a per-user platform data directory.
+The bucket's state, blobs and configuration SHALL live under one home directory, chosen by `--home`, then `MILKPAN_HOME`, then `.milkpan` in the user's home directory. A bucket in another location SHALL NOT be read or migrated implicitly.
 
 #### Scenario: Isolated bucket
 - **WHEN** a command runs with `MILKPAN_HOME` set to an empty directory
 - **THEN** it reads and writes only inside that directory
+
+#### Scenario: Default home
+- **WHEN** a command runs with neither `--home` nor `MILKPAN_HOME`
+- **THEN** it uses `~/.milkpan`, creating it on first write
 
 ### Requirement: Commands are reusable by depending binaries
 The bucket commands SHALL be available as a command set that a depending binary can register next to its own commands and providers.
